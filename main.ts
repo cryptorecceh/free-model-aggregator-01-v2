@@ -542,6 +542,9 @@ function modelsIn(wire: Wire, body: unknown): ProbedModel[] {
 }
 
 /** Probe one provider's catalog route, in its own wire, tolerating every failure. */
+/** Why each provider failed to probe, if it did: 'http <status>' or 'transport'. */
+const probeErrors = new Map<string, string>();
+
 async function probeProvider(provider: ProviderEntry, timeoutMs = PROBE_TIMEOUT_MS): Promise<Probe> {
   const base = joinBase(ENV_URL, provider.base);
   const url = provider.wire === 'gemini' ? `${base}/v1beta/models` : `${base}/v1/models`;
@@ -549,10 +552,14 @@ async function probeProvider(provider: ProviderEntry, timeoutMs = PROBE_TIMEOUT_
   if (provider.wire === 'anthropic') headers['anthropic-version'] = '2023-06-01';
   try {
     const res = await fetch(url, { headers, signal: AbortSignal.timeout(timeoutMs) });
-    if (!res.ok) return { provider, ok: false, models: [] };
+    if (!res.ok) {
+      probeErrors.set(provider.id, `http ${res.status}`);
+      return { provider, ok: false, models: [] };
+    }
     const body: unknown = await res.json();
     return { provider, ok: true, models: modelsIn(provider.wire, body) };
   } catch {
+    probeErrors.set(provider.id, 'transport');
     return { provider, ok: false, models: [] };
   }
 }
@@ -664,11 +671,13 @@ function candidatesFor(requires: Requirement, jsonWire: boolean): Candidate[] {
       });
     }
   }
+  const caps = new Map<string, number>();
+  for (const probe of probes) caps.set(probe.provider.id, remainingCap.get(probe.provider.id) ?? 0);
   out.sort((a, b) => {
     if (a.cappedOut !== b.cappedOut) return a.cappedOut ? 1 : -1;
     if (a.rating !== b.rating) return b.rating - a.rating;
-    const capA = remainingCap.get(a.probe.provider.id) ?? 0;
-    const capB = remainingCap.get(b.probe.provider.id) ?? 0;
+    const capA = caps.get(a.probe.provider.id) ?? 0;
+    const capB = caps.get(b.probe.provider.id) ?? 0;
     if (capA !== capB) return capB - capA;
     if (a.probe.provider.id !== b.probe.provider.id) return a.probe.provider.id < b.probe.provider.id ? -1 : 1;
     return a.model.id < b.model.id ? -1 : a.model.id > b.model.id ? 1 : 0;
